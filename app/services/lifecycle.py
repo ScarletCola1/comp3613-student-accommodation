@@ -1,13 +1,18 @@
 """
-Listing lifecycle tracker — procedural flag soup.
+Listing lifecycle -- State pattern.
 
-Intended flow: pending → verified → active|inactive, or pending → rejected.
-Landlord may toggle active/inactive only after verification.
+Each lifecycle status is a ``ListingState`` object that knows:
+  * which actions it allows and which state each action leads to
+  * whether listings in that state are visible to students
 
-This module mixes a status string with four boolean flags updated through
-nested conditionals. Invalid jumps are allowed; flags and status drift.
+``ListingLifecycle`` is the Context. It holds the current state and delegates
+every action to it, so an illegal move is refused in ONE place and the
+status string and the four legacy flags can never disagree (the flags are
+derived from the state, not stored independently).
 
-Ideal fix: State pattern (one state object per status with allowed transitions).
+Flow (docs/ACCEPTANCE.md 5-8):
+    pending --verify--> verified --activate--> active <--> inactive
+    pending --reject--> rejected --resubmit--> pending
 """
 
 from __future__ import annotations
@@ -24,6 +29,99 @@ ACTIONS = (
 )
 
 
+class IllegalTransition(Exception):
+    """Raised when the current state does not allow the requested action."""
+
+
+class ListingState:
+    """Base state: no transitions, not visible."""
+
+    name = ""
+    visible = False
+    transitions: dict[str, str] = {}
+
+    def handle(self, action: str) -> "ListingState":
+        target = self.transitions.get(action)
+        if target is None:
+            raise IllegalTransition(
+                f"cannot {action} a listing that is {self.name}"
+            )
+        return STATES[target]
+
+    def allowed_actions(self) -> tuple[str, ...]:
+        return tuple(self.transitions)
+
+
+class PendingState(ListingState):
+    name = "pending"
+    transitions = {"verify": "verified", "reject": "rejected"}
+
+
+class VerifiedState(ListingState):
+    name = "verified"
+    transitions = {"activate": "active", "reject": "rejected"}
+
+
+class ActiveState(ListingState):
+    name = "active"
+    visible = True
+    transitions = {"deactivate": "inactive"}
+
+
+class InactiveState(ListingState):
+    name = "inactive"
+    transitions = {"activate": "active"}
+
+
+class RejectedState(ListingState):
+    name = "rejected"
+    transitions = {"resubmit": "pending"}
+
+
+STATES: dict[str, ListingState] = {
+    s.name: s
+    for s in (
+        PendingState(),
+        VerifiedState(),
+        ActiveState(),
+        InactiveState(),
+        RejectedState(),
+    )
+}
+
+
+class ListingLifecycle:
+    """Context: holds the current state and delegates actions to it."""
+
+    def __init__(self, status: str) -> None:
+        if status not in STATES:
+            raise ValueError(f"unknown listing status {status!r}")
+        self.state = STATES[status]
+
+    @property
+    def status(self) -> str:
+        return self.state.name
+
+    @property
+    def visible_to_students(self) -> bool:
+        return self.state.visible
+
+    def apply(self, action: str) -> str:
+        """Move to the next state or raise IllegalTransition (state unchanged)."""
+        self.state = self.state.handle(action)
+        return self.status
+
+    def flags(self) -> dict[str, int]:
+        """Legacy flag columns, always derived from the one current state."""
+        s = self.status
+        return {
+            "flag_pending": int(s == "pending"),
+            "flag_verified": int(s == "verified"),
+            "flag_active": int(s == "active"),
+            "flag_rejected": int(s == "rejected"),
+        }
+
+
 def snapshot(listing: dict[str, Any]) -> dict[str, Any]:
     return {
         "id": listing["id"],
@@ -36,121 +134,24 @@ def snapshot(listing: dict[str, Any]) -> dict[str, Any]:
 
 
 def apply_action(listing: dict[str, Any], action: str) -> dict[str, Any]:
-    """
-    Mutate a copy of the listing according to action.
-
-    DEFECTS:
-    - verify does not clear pending consistently
-    - activate allowed from pending (skip verify)
-    - reject leaves flag_active set if it was somehow on
-    - deactivate from rejected "works"
-    - resubmit sets pending but leaves rejected=1
-    - status string and flags disagree after several transitions
-    """
+    """Apply an action to a listing dict; same result shape as the old API."""
     if action not in ACTIONS:
         return {"ok": False, "error": f"unknown action {action!r}"}
-
-    status = listing["status"]
-    pending = int(listing["flag_pending"])
-    verified = int(listing["flag_verified"])
-    active = int(listing["flag_active"])
-    rejected = int(listing["flag_rejected"])
-
     if action == "submit":
-        status = "pending"
-        pending = 1
-        return _ok(listing, status, pending, verified, active, rejected)
+        return {"ok": False, "error": "submit is only valid when creating a listing"}
+    try:
+        lifecycle = ListingLifecycle(listing["status"])
+        lifecycle.apply(action)
+    except (IllegalTransition, ValueError) as exc:
+        return {"ok": False, "error": str(exc)}
 
-    if action == "verify":
-        if status == "rejected" or rejected == 1:
-            # DEFECT: can verify a rejected listing without resubmit
-            status = "verified"
-            verified = 1
-            # leaves flag_rejected
-        elif status in {"pending", "verified"} or pending == 1:
-            status = "verified"
-            verified = 1
-            # DEFECT: often forgets to clear flag_pending
-        else:
-            verified = 1
-            status = "verified"
-        return _ok(listing, status, pending, verified, active, rejected)
-
-    if action == "reject":
-        status = "rejected"
-        rejected = 1
-        pending = 0
-        # DEFECT: does not clear verified/active
-        return _ok(listing, status, pending, verified, active, rejected)
-
-    if action == "activate":
-        # DEFECT: activate from pending skips verification
-        if status == "pending" or pending == 1:
-            status = "active"
-            active = 1
-            verified = 1  # pretends verified
-        elif status == "verified" or verified == 1:
-            status = "active"
-            active = 1
-        elif status == "inactive":
-            status = "active"
-            active = 1
-        elif status == "rejected":
-            # DEFECT: activate rejected
-            status = "active"
-            active = 1
-        else:
-            active = 1
-            status = "active"
-        return _ok(listing, status, pending, verified, active, rejected)
-
-    if action == "deactivate":
-        if status == "active" or active == 1:
-            status = "inactive"
-            active = 0
-        else:
-            # DEFECT: deactivate non-active still flips status
-            status = "inactive"
-            active = 0
-        return _ok(listing, status, pending, verified, active, rejected)
-
-    if action == "resubmit":
-        status = "pending"
-        pending = 1
-        # DEFECT: leaves rejected/verified/active flags
-        return _ok(listing, status, pending, verified, active, rejected)
-
-    return {"ok": False, "error": "unhandled"}
-
-
-def _ok(
-    listing: dict[str, Any],
-    status: str,
-    pending: int,
-    verified: int,
-    active: int,
-    rejected: int,
-) -> dict[str, Any]:
     updated = dict(listing)
-    updated["status"] = status
-    updated["flag_pending"] = pending
-    updated["flag_verified"] = verified
-    updated["flag_active"] = active
-    updated["flag_rejected"] = rejected
-    return {
-        "ok": True,
-        "listing": snapshot(updated),
-        "row": updated,
-        "changed": True,
-    }
+    updated["status"] = lifecycle.status
+    updated.update(lifecycle.flags())
+    return {"ok": True, "listing": snapshot(updated), "row": updated, "changed": True}
 
 
 def visible_to_students(listing: dict[str, Any]) -> bool:
-    """
-    Student browse predicate — inconsistent with status.
-
-    DEFECT: treats flag_active OR status==active; pending with active flag shows.
-    """
-    if listing.get("flag_active"):
-        return True
-    return listing.get("status") == "active"
+    """Visibility comes from the one current state, never from stray flags."""
+    status = listing.get("status")
+    return status in STATES and STATES[status].visible
