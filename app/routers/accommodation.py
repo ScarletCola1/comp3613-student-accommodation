@@ -30,11 +30,21 @@ class ListingBody(BaseModel):
 
 class TransitionBody(BaseModel):
     action: str = Field(
-        description="verify | reject | activate | deactivate | resubmit"
+        description="verify | reject | activate | deactivate | resubmit | withdraw | submit | force_deactivate | restore"
     )
     reason: str | None = Field(
         default=None, description="Required when action is reject"
     )
+
+
+class EditBody(BaseModel):
+    title: str | None = None
+    area: str | None = None
+    price: int | None = None
+    amenities: str | None = None
+    contact_phone: str | None = None
+    contact_email: str | None = None
+    photos: str | None = None
 
 
 class MessageBody(BaseModel):
@@ -86,6 +96,20 @@ def transition(
 ) -> dict[str, Any]:
     result = listings.transition(
         _actor_id(x_user_id), listing_id, body.action, body.reason
+    )
+    if not result.get("ok"):
+        raise HTTPException(status_code=400, detail=result.get("error"))
+    return result
+
+
+@router.put("/landlord/listings/{listing_id}")
+def edit(
+    listing_id: int,
+    body: EditBody,
+    x_user_id: str | None = Header(default=None),
+) -> dict[str, Any]:
+    result = listings.edit_listing(
+        _actor_id(x_user_id), listing_id, body.model_dump(exclude_none=True)
     )
     if not result.get("ok"):
         raise HTTPException(status_code=400, detail=result.get("error"))

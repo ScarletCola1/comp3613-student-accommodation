@@ -10,9 +10,16 @@ every action to it, so an illegal move is refused in ONE place and the
 status string and the four legacy flags can never disagree (the flags are
 derived from the state, not stored independently).
 
-Flow (docs/ACCEPTANCE.md 5-8):
-    pending --verify--> verified --activate--> active <--> inactive
-    pending --reject--> rejected --resubmit--> pending
+Eight states, fourteen transitions (Sprint 1 lifecycle diagram):
+    draft --submit--> pending --withdraw--> draft
+    pending --verify--> verified (the "Provisional" box in the diagram)
+    pending|verified --reject--> rejected --resubmit--> pending
+    verified --activate--> active <--activate/deactivate--> inactive
+    active --request_review--> re_review --verify--> active
+    active|inactive --force_deactivate--> force_deactivated --restore--> active
+
+Note: "verified" is the Provisional state of the Sprint 1 diagram. The starter
+and docs/ACCEPTANCE.md call it verified, and the landlord activates it (Conflict 4).
 """
 
 from __future__ import annotations
@@ -20,12 +27,16 @@ from __future__ import annotations
 from typing import Any
 
 ACTIONS = (
-    "submit",  # noop after create
+    "submit",
     "verify",
     "reject",
     "activate",
     "deactivate",
     "resubmit",
+    "withdraw",
+    "force_deactivate",
+    "restore",
+    "request_review",  # a significant edit to an active listing
 )
 
 
@@ -52,12 +63,23 @@ class ListingState:
         return tuple(self.transitions)
 
 
+class DraftState(ListingState):
+    name = "draft"
+    transitions = {"submit": "pending"}
+
+
 class PendingState(ListingState):
     name = "pending"
-    transitions = {"verify": "verified", "reject": "rejected"}
+    transitions = {
+        "verify": "verified",
+        "reject": "rejected",
+        "withdraw": "draft",
+    }
 
 
 class VerifiedState(ListingState):
+    """The Provisional state of the Sprint 1 diagram."""
+
     name = "verified"
     transitions = {"activate": "active", "reject": "rejected"}
 
@@ -65,12 +87,21 @@ class VerifiedState(ListingState):
 class ActiveState(ListingState):
     name = "active"
     visible = True
-    transitions = {"deactivate": "inactive"}
+    transitions = {
+        "deactivate": "inactive",
+        "request_review": "re_review",
+        "force_deactivate": "force_deactivated",
+    }
 
 
 class InactiveState(ListingState):
     name = "inactive"
-    transitions = {"activate": "active"}
+    transitions = {"activate": "active", "force_deactivate": "force_deactivated"}
+
+
+class ReReviewState(ListingState):
+    name = "re_review"
+    transitions = {"verify": "active"}
 
 
 class RejectedState(ListingState):
@@ -78,14 +109,22 @@ class RejectedState(ListingState):
     transitions = {"resubmit": "pending"}
 
 
+class ForceDeactivatedState(ListingState):
+    name = "force_deactivated"
+    transitions = {"restore": "active"}
+
+
 STATES: dict[str, ListingState] = {
     s.name: s
     for s in (
+        DraftState(),
         PendingState(),
         VerifiedState(),
         ActiveState(),
         InactiveState(),
+        ReReviewState(),
         RejectedState(),
+        ForceDeactivatedState(),
     )
 }
 
@@ -137,8 +176,6 @@ def apply_action(listing: dict[str, Any], action: str) -> dict[str, Any]:
     """Apply an action to a listing dict; same result shape as the old API."""
     if action not in ACTIONS:
         return {"ok": False, "error": f"unknown action {action!r}"}
-    if action == "submit":
-        return {"ok": False, "error": "submit is only valid when creating a listing"}
     try:
         lifecycle = ListingLifecycle(listing["status"])
         lifecycle.apply(action)
