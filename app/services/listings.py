@@ -37,6 +37,11 @@ def _now() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
 
 
+def _eligible_student(student: dict[str, Any]) -> bool:
+    """Registered student ID or provisional incoming pathway (ACCEPTANCE 1)."""
+    return bool(student.get("student_id")) or bool(student.get("provisional"))
+
+
 def _parse_amenities(raw: str) -> list[str]:
     return [a.strip().lower() for a in (raw or "").split(",") if a.strip()]
 
@@ -55,10 +60,15 @@ def submit_listing(
     user = get_user(landlord_id)
     if not user or user["role"] != "landlord":
         return {"ok": False, "error": "landlords only"}
-    # DEFECT: area not restricted to ALLOWED_AREAS
+    area = (area or "").strip().lower()
+    if area not in ALLOWED_AREAS:
+        return {"ok": False, "error": "area must be st_augustine or mount_hope"}
     if price <= 0:
         return {"ok": False, "error": "price must be positive"}
-    # DEFECT: empty amenities allowed
+    if not _parse_amenities(amenities):
+        return {"ok": False, "error": "at least one amenity is required"}
+    if not title.strip() or not contact_phone.strip() or not contact_email.strip():
+        return {"ok": False, "error": "title and contact details are required"}
 
     with Session(engine) as session:
         listing = Listing(
@@ -179,6 +189,12 @@ def edit_listing(
             return {"ok": False, "error": "listing was force-deactivated by the admin"}
         if "price" in changes and int(changes["price"]) <= 0:
             return {"ok": False, "error": "price must be positive"}
+        if "area" in changes:
+            changes["area"] = str(changes["area"]).strip().lower()
+            if changes["area"] not in ALLOWED_AREAS:
+                return {"ok": False, "error": "area must be st_augustine or mount_hope"}
+        if "amenities" in changes and not _parse_amenities(changes["amenities"]):
+            return {"ok": False, "error": "at least one amenity is required"}
 
         significant = any(
             getattr(listing, f) != changes[f] for f in SIGNIFICANT_FIELDS if f in changes
@@ -245,7 +261,11 @@ def browse_for_students(
     student = get_user(student_id)
     if not student or student["role"] != "student":
         return {"ok": False, "error": "students only"}
-    # DEFECT: provisional / missing student_id not blocked
+    if not _eligible_student(student):
+        return {"ok": False, "error": "only eligible students can browse listings"}
+
+    wanted_area = (area or "").strip().lower()
+    wanted_amenities = set(_parse_amenities(amenity or ""))
 
     with Session(engine) as session:
         rows = session.exec(select(Listing).order_by(Listing.id)).all()
@@ -255,12 +275,16 @@ def browse_for_students(
     for item in items:
         if not visible_to_students(item):
             continue
-        if area and item["area"] != area:
+        if item["area"] not in ALLOWED_AREAS:  # St. Augustine / Mount Hope only
+            continue
+        if wanted_area and item["area"] != wanted_area:
             continue
         if max_price is not None and int(item["price"]) > max_price:
             continue
-        # DEFECT: amenity filter is substring on raw string, case-sensitive sometimes
-        if amenity and amenity not in item["amenities"]:
+        # every requested amenity must match exactly, ignoring case
+        if wanted_amenities and not wanted_amenities <= set(
+            _parse_amenities(item["amenities"])
+        ):
             continue
         results.append(item)
     return {"ok": True, "listings": results}
@@ -284,7 +308,11 @@ def send_message(student_id: int, listing_id: int, body: str) -> dict[str, Any]:
         listing = session.get(Listing, listing_id)
         if listing is None:
             return {"ok": False, "error": "listing not found"}
-        # DEFECT: can message pending/rejected listings
+        # Only listings the student may see can be messaged (ACCEPTANCE 10, FR-21)
+        if not _eligible_student(student):
+            return {"ok": False, "error": "only eligible students can message"}
+        if not visible_to_students(listing.model_dump()):
+            return {"ok": False, "error": "this listing is no longer available"}
         message = Message(
             listing_id=listing_id,
             student_id=student_id,
