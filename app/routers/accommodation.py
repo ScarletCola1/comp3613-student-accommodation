@@ -32,6 +32,9 @@ class TransitionBody(BaseModel):
     action: str = Field(
         description="verify | reject | activate | deactivate | resubmit"
     )
+    reason: str | None = Field(
+        default=None, description="Required when action is reject"
+    )
 
 
 class MessageBody(BaseModel):
@@ -81,9 +84,21 @@ def transition(
     body: TransitionBody,
     x_user_id: str | None = Header(default=None),
 ) -> dict[str, Any]:
-    result = listings.transition(_actor_id(x_user_id), listing_id, body.action)
+    result = listings.transition(
+        _actor_id(x_user_id), listing_id, body.action, body.reason
+    )
     if not result.get("ok"):
         raise HTTPException(status_code=400, detail=result.get("error"))
+    return result
+
+
+@router.get("/listings/{listing_id}/history")
+def history(
+    listing_id: int, x_user_id: str | None = Header(default=None)
+) -> dict[str, Any]:
+    result = listings.get_history(_actor_id(x_user_id), listing_id)
+    if not result.get("ok"):
+        raise HTTPException(status_code=403, detail=result.get("error"))
     return result
 
 

@@ -10,6 +10,7 @@ from sqlmodel import Session, select
 from app.database import engine
 from app.models.listing import Listing
 from app.models.message import Message
+from app.models.state_change_log import StateChangeLog
 from app.services.housing_auth import get_user
 from app.services.lifecycle import ACTIONS, apply_action, visible_to_students
 
@@ -66,7 +67,9 @@ def submit_listing(
         return {"ok": True, "listing": listing.model_dump()}
 
 
-def transition(actor_id: int, listing_id: int, action: str) -> dict[str, Any]:
+def transition(
+    actor_id: int, listing_id: int, action: str, reason: str | None = None
+) -> dict[str, Any]:
     actor = get_user(actor_id)
     if not actor:
         return {"ok": False, "error": "unknown user"}
@@ -89,6 +92,11 @@ def transition(actor_id: int, listing_id: int, action: str) -> dict[str, Any]:
             elif actor["role"] != "admin":
                 return {"ok": False, "error": "landlord/admin only"}
 
+        # A rejection must say why, so the landlord can fix it (FR-8)
+        if action == "reject" and not (reason or "").strip():
+            return {"ok": False, "error": "a reason is required to reject a listing"}
+
+        old_status = listing.status
         result = apply_action(row, action)
         if not result.get("ok"):
             return result
@@ -100,9 +108,44 @@ def transition(actor_id: int, listing_id: int, action: str) -> dict[str, Any]:
         listing.flag_active = updated["flag_active"]
         listing.flag_rejected = updated["flag_rejected"]
         session.add(listing)
+        # One history row per change: who, when, old -> new state, reason (FR-17)
+        session.add(
+            StateChangeLog(
+                listing_id=listing_id,
+                actor_id=actor_id,
+                actor_role=actor["role"],
+                action=action,
+                old_state=old_status,
+                new_state=updated["status"],
+                reason=(reason or "").strip(),
+                created_at=_now(),
+            )
+        )
         session.commit()
         session.refresh(listing)
         return {"ok": True, "listing": listing.model_dump()}
+
+
+def get_history(actor_id: int, listing_id: int) -> dict[str, Any]:
+    """History of a listing: the admin, or the landlord who owns it."""
+    actor = get_user(actor_id)
+    if not actor:
+        return {"ok": False, "error": "unknown user"}
+    with Session(engine) as session:
+        listing = session.get(Listing, listing_id)
+        if listing is None:
+            return {"ok": False, "error": "listing not found"}
+        if actor["role"] == "landlord":
+            if listing.landlord_id != actor_id:
+                return {"ok": False, "error": "not your listing"}
+        elif actor["role"] != "admin":
+            return {"ok": False, "error": "admin or owning landlord only"}
+        rows = session.exec(
+            select(StateChangeLog)
+            .where(StateChangeLog.listing_id == listing_id)
+            .order_by(StateChangeLog.id)
+        ).all()
+        return {"ok": True, "history": [r.model_dump() for r in rows]}
 
 
 def browse_for_students(
