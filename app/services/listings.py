@@ -79,15 +79,15 @@ def transition(actor_id: int, listing_id: int, action: str) -> dict[str, Any]:
             return {"ok": False, "error": "listing not found"}
         row = listing.model_dump()
 
-        # Role gates (loose)
+        # Role and ownership gates
         if action in {"verify", "reject"} and actor["role"] != "admin":
             return {"ok": False, "error": "admin only"}
-        if action in {"activate", "deactivate", "resubmit"} and actor["role"] not in {
-            "landlord",
-            "admin",
-        }:
-            return {"ok": False, "error": "landlord/admin only"}
-        # DEFECT: any landlord can activate any listing (no ownership check)
+        if action in {"activate", "deactivate", "resubmit"}:
+            if actor["role"] == "landlord":
+                if listing.landlord_id != actor_id:
+                    return {"ok": False, "error": "not your listing"}
+            elif actor["role"] != "admin":
+                return {"ok": False, "error": "landlord/admin only"}
 
         result = apply_action(row, action)
         if not result.get("ok"):
