@@ -12,9 +12,25 @@ from app.models.listing import Listing
 from app.models.message import Message
 from app.models.state_change_log import StateChangeLog
 from app.services.housing_auth import get_user
-from app.services.lifecycle import ACTIONS, apply_action, visible_to_students
+from app.services.lifecycle import (
+    ACTIONS,
+    ListingLifecycle,
+    apply_action,
+    visible_to_students,
+)
 
 ALLOWED_AREAS = {"st_augustine", "mount_hope"}
+
+# Who may perform each lifecycle action (FR-14, FR-15)
+ADMIN_ONLY = {"verify", "reject", "force_deactivate", "restore"}
+OWNER_OR_ADMIN = {"submit", "activate", "deactivate", "resubmit", "withdraw"}
+# Actions that must carry a reason
+REASON_REQUIRED = {"reject", "force_deactivate"}
+# Editing these fields on an active listing sends it back to Re-review (FR-12)
+SIGNIFICANT_FIELDS = {"price", "amenities", "area"}
+EDITABLE_FIELDS = {
+    "title", "area", "price", "amenities", "contact_phone", "contact_email", "photos",
+}
 
 
 def _now() -> str:
@@ -83,18 +99,20 @@ def transition(
         row = listing.model_dump()
 
         # Role and ownership gates
-        if action in {"verify", "reject"} and actor["role"] != "admin":
+        if action in ADMIN_ONLY and actor["role"] != "admin":
             return {"ok": False, "error": "admin only"}
-        if action in {"activate", "deactivate", "resubmit"}:
+        if action in OWNER_OR_ADMIN:
             if actor["role"] == "landlord":
                 if listing.landlord_id != actor_id:
                     return {"ok": False, "error": "not your listing"}
             elif actor["role"] != "admin":
                 return {"ok": False, "error": "landlord/admin only"}
+        if action == "request_review":
+            return {"ok": False, "error": "request_review happens through editing"}
 
-        # A rejection must say why, so the landlord can fix it (FR-8)
-        if action == "reject" and not (reason or "").strip():
-            return {"ok": False, "error": "a reason is required to reject a listing"}
+        # Some actions must say why, so the history is useful (FR-8, FR-17)
+        if action in REASON_REQUIRED and not (reason or "").strip():
+            return {"ok": False, "error": f"a reason is required to {action}"}
 
         old_status = listing.status
         result = apply_action(row, action)
@@ -118,6 +136,75 @@ def transition(
                 old_state=old_status,
                 new_state=updated["status"],
                 reason=(reason or "").strip(),
+                created_at=_now(),
+            )
+        )
+        session.commit()
+        session.refresh(listing)
+        return {"ok": True, "listing": listing.model_dump()}
+
+
+def edit_listing(
+    actor_id: int, listing_id: int, changes: dict[str, Any]
+) -> dict[str, Any]:
+    """Edit a listing. Rules by state (FR-10, FR-11, FR-12):
+
+    - pending / verified / re_review: refused (under review)
+    - force_deactivated: refused (admin must restore it first)
+    - active: a minor edit keeps it active; a significant edit (price, amenities,
+      area) hides it at once and sends it to Re-review
+    - draft / rejected / inactive: edit allowed, state unchanged
+    """
+    actor = get_user(actor_id)
+    if not actor:
+        return {"ok": False, "error": "unknown user"}
+    changes = {k: v for k, v in changes.items() if k in EDITABLE_FIELDS and v is not None}
+    if not changes:
+        return {"ok": False, "error": "nothing to change"}
+
+    with Session(engine) as session:
+        listing = session.get(Listing, listing_id)
+        if listing is None:
+            return {"ok": False, "error": "listing not found"}
+        if actor["role"] == "landlord":
+            if listing.landlord_id != actor_id:
+                return {"ok": False, "error": "not your listing"}
+        elif actor["role"] != "admin":
+            return {"ok": False, "error": "landlord/admin only"}
+
+        status = listing.status
+        if status in {"pending", "verified", "re_review"}:
+            return {"ok": False, "error": "listing is under review and cannot be edited"}
+        if status == "force_deactivated":
+            return {"ok": False, "error": "listing was force-deactivated by the admin"}
+        if "price" in changes and int(changes["price"]) <= 0:
+            return {"ok": False, "error": "price must be positive"}
+
+        significant = any(
+            getattr(listing, f) != changes[f] for f in SIGNIFICANT_FIELDS if f in changes
+        )
+        for field, value in changes.items():
+            setattr(listing, field, value)
+
+        new_status = status
+        reason = "minor edit"
+        if status == "active" and significant:
+            lifecycle = ListingLifecycle(status)
+            new_status = lifecycle.apply("request_review")
+            listing.status = new_status
+            for flag, val in lifecycle.flags().items():
+                setattr(listing, flag, val)
+            reason = "significant edit: " + ", ".join(sorted(changes))
+        session.add(listing)
+        session.add(
+            StateChangeLog(
+                listing_id=listing_id,
+                actor_id=actor_id,
+                actor_role=actor["role"],
+                action="edit",
+                old_state=status,
+                new_state=new_status,
+                reason=reason,
                 created_at=_now(),
             )
         )
