@@ -26,6 +26,10 @@ class ListingBody(BaseModel):
     contact_phone: str
     contact_email: str
     photos: str = ""
+    save_as_draft: bool = Field(
+        default=False,
+        description="True saves the listing as a Draft; submit it later with action=submit",
+    )
 
 
 class TransitionBody(BaseModel):
@@ -82,6 +86,7 @@ def submit(
         contact_phone=body.contact_phone,
         contact_email=body.contact_email,
         photos=body.photos,
+        save_as_draft=body.save_as_draft,
     )
     if not result.get("ok"):
         raise HTTPException(status_code=400, detail=result.get("error"))

@@ -56,6 +56,7 @@ def submit_listing(
     contact_phone: str,
     contact_email: str,
     photos: str = "",
+    save_as_draft: bool = False,
 ) -> dict[str, Any]:
     user = get_user(landlord_id)
     if not user or user["role"] != "landlord":
@@ -80,8 +81,8 @@ def submit_listing(
             contact_phone=contact_phone,
             contact_email=contact_email,
             photos=photos,
-            status="pending",
-            flag_pending=1,
+            status="draft" if save_as_draft else "pending",
+            flag_pending=0 if save_as_draft else 1,
             flag_verified=0,
             flag_active=0,
             flag_rejected=0,

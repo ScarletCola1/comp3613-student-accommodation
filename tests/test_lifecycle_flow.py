@@ -158,3 +158,35 @@ def test_edits_are_written_to_history():
     rows = client.get(f"/api/listings/{lid}/history", headers=_h(ADMIN)).json()["history"]
     assert rows[-1]["action"] == "edit"
     assert (rows[-1]["old_state"], rows[-1]["new_state"]) == ("active", "re_review")
+
+
+def test_save_as_draft_then_submit_then_hidden_until_active():
+    _ids()
+    body = {
+        "title": "Draft room", "area": "st_augustine", "price": 1800,
+        "amenities": "wifi", "contact_phone": "555", "contact_email": "l@x.com",
+        "save_as_draft": True,
+    }
+    r = client.post("/api/landlord/listings", json=body, headers=_h(LANDLORD))
+    assert r.status_code == 200
+    listing = r.json()["listing"]
+    assert listing["status"] == "draft"
+    assert listing["flag_pending"] == 0
+    lid = listing["id"]
+    # draft is hidden from students and cannot be verified by an admin yet
+    r = client.post(f"/api/listings/{lid}/transition", json={"action": "verify"}, headers=_h(ADMIN))
+    assert r.status_code == 400
+    # landlord submits the draft, then it follows the normal lifecycle
+    r = client.post(f"/api/listings/{lid}/transition", json={"action": "submit"}, headers=_h(LANDLORD))
+    assert r.status_code == 200
+    assert r.json()["listing"]["status"] == "pending"
+
+
+def test_default_create_is_still_pending():
+    _ids()
+    body = {
+        "title": "Normal room", "area": "st_augustine", "price": 1800,
+        "amenities": "wifi", "contact_phone": "555", "contact_email": "l@x.com",
+    }
+    r = client.post("/api/landlord/listings", json=body, headers=_h(LANDLORD))
+    assert r.json()["listing"]["status"] == "pending"
