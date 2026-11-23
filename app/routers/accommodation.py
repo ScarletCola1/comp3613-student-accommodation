@@ -174,3 +174,21 @@ def landlord_messages(x_user_id: str | None = Header(default=None)) -> dict[str,
     if not result.get("ok"):
         raise HTTPException(status_code=403, detail=result.get("error"))
     return result
+
+
+@router.get("/notifications")
+def my_notifications(x_user_id: str | None = Header(default=None)) -> dict[str, Any]:
+    result = listings.get_notifications(_actor_id(x_user_id))
+    if not result.get("ok"):
+        raise HTTPException(status_code=403, detail=result.get("error"))
+    return result
+
+
+@router.post("/notifications/{notification_id}/read")
+def read_notification(
+    notification_id: int, x_user_id: str | None = Header(default=None)
+) -> dict[str, Any]:
+    result = listings.mark_notification_read(_actor_id(x_user_id), notification_id)
+    if not result.get("ok"):
+        raise HTTPException(status_code=404, detail=result.get("error"))
+    return result
