@@ -10,7 +10,9 @@ from sqlmodel import Session, select
 from app.database import engine
 from app.models.listing import Listing
 from app.models.message import Message
+from app.models.notification import Notification
 from app.models.state_change_log import StateChangeLog
+from app.models.user import User
 from app.services.housing_auth import get_user
 from app.services.lifecycle import (
     ACTIONS,
@@ -89,9 +91,45 @@ def submit_listing(
             created_at=_now(),
         )
         session.add(listing)
+        session.flush()  # gives the listing its id
+        if not save_as_draft:
+            # A new pending listing needs the admin's attention (FR-19)
+            _notify_admins(session, listing, f'"{listing.title}" is waiting for verification.')
         session.commit()
         session.refresh(listing)
         return {"ok": True, "listing": listing.model_dump()}
+
+
+def _notify(session: Session, user_id: int, listing: Listing, message: str) -> None:
+    session.add(
+        Notification(
+            user_id=user_id, listing_id=listing.id, message=message, created_at=_now()
+        )
+    )
+
+
+def _notify_admins(session: Session, listing: Listing, message: str) -> None:
+    admins = session.exec(select(User).where(User.role == "admin")).all()
+    for admin in admins:
+        _notify(session, admin.id, listing, message)
+
+
+def _notify_after_transition(
+    session: Session, listing: Listing, actor_id: int, action: str, new_state: str,
+    reason: str,
+) -> None:
+    """Tell the people who need to know about a lifecycle change (FR-19, FR-20)."""
+    title = listing.title
+    if action in {"submit", "resubmit"}:
+        _notify_admins(session, listing, f'"{title}" is waiting for verification.')
+    if action == "request_review":
+        _notify_admins(session, listing, f'"{title}" was edited and needs re-review.')
+    # The landlord hears about anything an admin did to their listing
+    if listing.landlord_id != actor_id:
+        text = f'Your listing "{title}" is now {new_state}.'
+        if reason:
+            text += f" Reason: {reason}"
+        _notify(session, listing.landlord_id, listing, text)
 
 
 def transition(
@@ -149,6 +187,9 @@ def transition(
                 reason=(reason or "").strip(),
                 created_at=_now(),
             )
+        )
+        _notify_after_transition(
+            session, listing, actor_id, action, updated["status"], (reason or "").strip()
         )
         session.commit()
         session.refresh(listing)
@@ -225,6 +266,10 @@ def edit_listing(
                 created_at=_now(),
             )
         )
+        if new_status == "re_review":
+            _notify_after_transition(
+                session, listing, actor_id, "request_review", new_status, reason
+            )
         session.commit()
         session.refresh(listing)
         return {"ok": True, "listing": listing.model_dump()}
@@ -359,3 +404,27 @@ def landlord_inbox(landlord_id: int) -> dict[str, Any]:
                 for m in rows
             ],
         }
+
+
+def get_notifications(user_id: int) -> dict[str, Any]:
+    """The caller's own notifications, newest first (FR-19, FR-20)."""
+    if not get_user(user_id):
+        return {"ok": False, "error": "unknown user"}
+    with Session(engine) as session:
+        rows = session.exec(
+            select(Notification)
+            .where(Notification.user_id == user_id)
+            .order_by(Notification.id.desc())
+        ).all()
+        return {"ok": True, "notifications": [r.model_dump() for r in rows]}
+
+
+def mark_notification_read(user_id: int, notification_id: int) -> dict[str, Any]:
+    with Session(engine) as session:
+        row = session.get(Notification, notification_id)
+        if row is None or row.user_id != user_id:
+            return {"ok": False, "error": "notification not found"}
+        row.is_read = True
+        session.add(row)
+        session.commit()
+        return {"ok": True}
