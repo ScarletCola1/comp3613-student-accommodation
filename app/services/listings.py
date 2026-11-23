@@ -324,3 +324,38 @@ def send_message(student_id: int, listing_id: int, body: str) -> dict[str, Any]:
         session.commit()
         session.refresh(message)
         return {"ok": True, "message_id": message.id}
+
+
+def landlord_inbox(landlord_id: int) -> dict[str, Any]:
+    """Messages students sent about this landlord's own listings, newest first (FR-26)."""
+    user = get_user(landlord_id)
+    if not user or user["role"] != "landlord":
+        return {"ok": False, "error": "landlords only"}
+    with Session(engine) as session:
+        own = {
+            row.id: row.title
+            for row in session.exec(
+                select(Listing).where(Listing.landlord_id == landlord_id)
+            ).all()
+        }
+        if not own:
+            return {"ok": True, "messages": []}
+        rows = session.exec(
+            select(Message)
+            .where(Message.listing_id.in_(list(own)))
+            .order_by(Message.id.desc())
+        ).all()
+        return {
+            "ok": True,
+            "messages": [
+                {
+                    "id": m.id,
+                    "listing_id": m.listing_id,
+                    "listing_title": own[m.listing_id],
+                    "student_id": m.student_id,
+                    "body": m.body,
+                    "created_at": m.created_at,
+                }
+                for m in rows
+            ],
+        }

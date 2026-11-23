@@ -190,3 +190,24 @@ def test_default_create_is_still_pending():
     }
     r = client.post("/api/landlord/listings", json=body, headers=_h(LANDLORD))
     assert r.json()["listing"]["status"] == "pending"
+
+
+def test_landlord_inbox_shows_only_own_listing_messages():
+    lid = _make_active()
+    other_lid = _listing()
+    assert _act(ADMIN, other_lid, "verify").status_code == 200
+    # message on LANDLORD's active listing
+    r = client.post("/api/student/messages", headers=_h(STUDENT),
+                    json={"listing_id": lid, "body": "Is it still free?"})
+    assert r.status_code == 200
+    mine = client.get("/api/landlord/messages", headers=_h(LANDLORD)).json()["messages"]
+    assert any(m["listing_id"] == lid and m["body"] == "Is it still free?" for m in mine)
+    # the other landlord must not see it
+    theirs = client.get("/api/landlord/messages", headers=_h(OTHER)).json()["messages"]
+    assert all(m["listing_id"] != lid for m in theirs)
+
+
+def test_inbox_is_landlords_only():
+    _ids()
+    assert client.get("/api/landlord/messages", headers=_h(STUDENT)).status_code == 403
+    assert client.get("/api/landlord/messages", headers=_h(ADMIN)).status_code == 403

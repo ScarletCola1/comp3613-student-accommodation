@@ -48,6 +48,7 @@ header. After `init`, the seeded ids are: admin = 1, student = 2, landlord = 4, 
 | 8 | admin (1) | `POST /api/listings/{id}/transition` `{"action": "verify"}` | back to `active` |
 | 9 | admin (1) | `POST /api/listings/{id}/transition` `{"action": "force_deactivate", "reason": "..."}` | `force_deactivated` |
 | 10 | landlord (4) | `GET /api/listings/{id}/history` | one row per change above |
+| 11 | student (2) then landlord (4) | `POST /api/student/messages`, then `GET /api/landlord/messages` | landlord sees the student's message about their own listing |
 
 Refused moves return HTTP 400 and change nothing, for example a landlord calling `verify`,
 or activating a `pending` listing. The state classes are in `app/services/lifecycle.py`.
