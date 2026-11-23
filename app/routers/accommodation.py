@@ -166,3 +166,11 @@ def message(
     if not result.get("ok"):
         raise HTTPException(status_code=400, detail=result.get("error"))
     return result
+
+
+@router.get("/landlord/messages")
+def landlord_messages(x_user_id: str | None = Header(default=None)) -> dict[str, Any]:
+    result = listings.landlord_inbox(_actor_id(x_user_id))
+    if not result.get("ok"):
+        raise HTTPException(status_code=403, detail=result.get("error"))
+    return result
